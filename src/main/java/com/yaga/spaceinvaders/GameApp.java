@@ -36,6 +36,12 @@ public class GameApp extends Application {
     private final List<Bullet> bullets = new ArrayList<>();
     private final List<Bullet> alienBullets = new ArrayList<>();
     private final List<Alien> aliens = new ArrayList<>();
+    private final List<Bunker> bunkers = new ArrayList<>();
+
+    // Бонусный корабль (UFO)
+    private BonusShip bonus;                 // null — нет на экране
+    private double bonusSpawnTimer = 0;      // секунд до следующего появления
+
     private double fleetDX = 40; // пикс/сек, направление по X
     private double fleetStepDown = 18;
     private double shootCooldown = 0;
@@ -85,6 +91,9 @@ public class GameApp extends Application {
         bullets.clear();
         alienBullets.clear();
         aliens.clear();
+        bunkers.clear();
+        bonus = null;
+        bonusSpawnTimer = nextBonusDelay();
         score = 0;
         lives = START_LIVES;
         gameOver = false;
@@ -101,6 +110,18 @@ public class GameApp extends Application {
             }
         }
         fleetDX = 40;
+
+        // --- Укрытия (3 бункера по 6x3 кирпичиков)
+        int cellsX = 6, cellsY = 3;
+        double cellW = 18, cellH = 12;
+        double bunkerW = cellsX * cellW;
+        double bunkerH = cellsY * cellH;
+        double y = H - 140;
+
+        double[] xs = { W * 0.18, W * 0.48, W * 0.78 };
+        for (double x : xs) {
+            bunkers.add(new Bunker(x - bunkerW/2, y - bunkerH/2, cellsX, cellsY, cellW, cellH));
+        }
     }
 
     private void resetGame() {
@@ -152,11 +173,23 @@ public class GameApp extends Application {
 
         // Случайные выстрелы пришельцев (из нижних в колонке)
         if (!aliens.isEmpty() && ThreadLocalRandom.current().nextDouble() < 0.9 * dt) {
-            // выбираем случайную колонку и нижнего в ней
             int col = ThreadLocalRandom.current().nextInt(10);
             Alien shooter = bottomAlienOfColumn(col, 60, 36);
             if (shooter != null) {
                 alienBullets.add(new Bullet(shooter.x + shooter.w / 2 - 1.5, shooter.y + shooter.h + 4, 3, 10, ALIEN_BULLET_SPEED));
+            }
+        }
+
+        // --- Бонусный корабль: спавн и движение
+        bonusSpawnTimer -= dt;
+        if (bonus == null && bonusSpawnTimer <= 0) {
+            spawnBonus();
+        }
+        if (bonus != null) {
+            bonus.x += bonus.vx * dt;
+            if (bonus.x + bonus.w < -5 || bonus.x > W + 5) {
+                bonus = null;
+                bonusSpawnTimer = nextBonusDelay();
             }
         }
 
@@ -169,6 +202,34 @@ public class GameApp extends Application {
                 itB.remove();
                 aliens.remove(hit);
                 score += 10;
+            }
+        }
+
+        // Пули игрока vs бункеры
+        itB = bullets.iterator();
+        while (itB.hasNext()) {
+            Bullet b = itB.next();
+            if (damageFirstHitBunker(b)) {
+                itB.remove();
+            }
+        }
+
+        // Пули игрока vs бонусный корабль
+        if (bonus != null) {
+            itB = bullets.iterator();
+            boolean destroyed = false;
+            while (itB.hasNext()) {
+                Bullet b = itB.next();
+                if (bonus.intersects(b)) {
+                    itB.remove();
+                    destroyed = true;
+                    break;
+                }
+            }
+            if (destroyed) {
+                score += 100;     // награда
+                bonus = null;
+                bonusSpawnTimer = nextBonusDelay();
             }
         }
 
@@ -190,6 +251,15 @@ public class GameApp extends Application {
             }
         }
 
+        // Пули пришельцев vs бункеры
+        itAB = alienBullets.iterator();
+        while (itAB.hasNext()) {
+            Bullet b = itAB.next();
+            if (damageFirstHitBunker(b)) {
+                itAB.remove();
+            }
+        }
+
         // Проигрыш, если пришельцы опустились
         for (Alien a : aliens) {
             if (a.y + a.h >= H - 70) gameOver = true;
@@ -200,6 +270,29 @@ public class GameApp extends Application {
             initGame();
             score += 50; // бонус за волну
         }
+    }
+
+    private double nextBonusDelay() {
+        // следующая попытка появления через 8–16 секунд
+        return ThreadLocalRandom.current().nextDouble(8.0, 16.0);
+    }
+
+    private void spawnBonus() {
+        // 50/50 слева направо или справа налево
+        boolean fromLeft = ThreadLocalRandom.current().nextBoolean();
+        double y = 42;
+        double w = 34, h = 14;
+        double speed = ThreadLocalRandom.current().nextDouble(120, 180); // пикс/сек
+        double x = fromLeft ? -w - 4 : W + 4;
+        double vx = fromLeft ? speed : -speed;
+        bonus = new BonusShip(x, y, w, h, vx);
+    }
+
+    private boolean damageFirstHitBunker(Bullet b) {
+        for (Bunker bun : bunkers) {
+            if (bun.damage(b)) return true;
+        }
+        return false;
     }
 
     private Alien bottomAlienOfColumn(int col, double startX, double gapX) {
@@ -231,6 +324,12 @@ public class GameApp extends Application {
         g.fillText("LIVES", W - 180, 36);
         // иконки жизней
         for (int i = 0; i < Math.max(0, lives + 1); i++) drawShipIcon(W - 110 + i * 28, 20);
+
+        // Бонусный корабль
+        if (bonus != null) bonus.draw(g);
+
+        // Бункеры
+        for (Bunker bun : bunkers) bun.draw(g);
 
         // Игрок
         player.drawShip(g);
@@ -282,16 +381,12 @@ public class GameApp extends Application {
     public static class Alien extends Entity {
         public Alien(double x, double y, double w, double h) { super(x, y, w, h); }
         void drawAlien(GraphicsContext g) {
-            // пиксельный силуэт «пришельца»
             g.setFill(GREEN);
-            // тело
             g.fillRect(x, y + 6, w, 6);
             g.fillRect(x + 2, y + 2, w - 4, 4);
             g.fillRect(x + 4, y + 12, w - 8, 4);
-            // ножки
             g.fillRect(x + 2, y + 16, 6, 2);
             g.fillRect(x + w - 8, y + 16, 6, 2);
-            // глазки
             g.clearRect(x + 6, y + 8, 4, 2);
             g.clearRect(x + w - 10, y + 8, 4, 2);
         }
@@ -305,8 +400,114 @@ public class GameApp extends Application {
         }
     }
 
+    public static class Bunker {
+        double x, y;        // левый верх
+        int cols, rows;     // размер сетки
+        double cellW, cellH;
+        boolean[][] alive;  // какие «кирпичики» ещё живы
+
+        public Bunker(double x, double y, int cols, int rows, double cellW, double cellH) {
+            this.x = x; this.y = y;
+            this.cols = cols; this.rows = rows;
+            this.cellW = cellW; this.cellH = cellH;
+            this.alive = new boolean[rows][cols];
+            for (int r = 0; r < rows; r++) Arrays.fill(alive[r], true);
+
+            // чуть «скошенные» углы внизу
+            if (rows >= 3 && cols >= 6) {
+                alive[rows-1][0] = false;
+                alive[rows-1][cols-1] = false;
+            }
+        }
+
+        // Нанести урон пули; вернуть true, если пуля поглощена
+        // Нанести урон; true — пуля поглощена бункером (кирпич сломан)
+        boolean damage(Entity bullet) {
+            // быстрый AABB по бункеру в целом
+            double bw = cols * cellW, bh = rows * cellH;
+            if (!(bullet.x < x + bw && bullet.x + bullet.w > x && bullet.y < y + bh && bullet.y + bullet.h > y))
+                return false;
+
+            // диапазон клеток, которых касается AABB пули
+            int cMin = (int)Math.floor((bullet.x - x) / cellW);
+            int cMax = (int)Math.floor((bullet.x + bullet.w - 1e-4 - x) / cellW);
+            int rMin = (int)Math.floor((bullet.y - y) / cellH);
+            int rMax = (int)Math.floor((bullet.y + bullet.h - 1e-4 - y) / cellH);
+
+            cMin = Math.max(0, cMin); cMax = Math.min(cols - 1, cMax);
+            rMin = Math.max(0, rMin); rMax = Math.min(rows - 1, rMax);
+
+            // чуть уменьшим «жёсткость» зазора, чтобы попадания засчитывались честно
+            final double GAP = 1.5; // было 2
+
+            for (int r = rMin; r <= rMax; r++) {
+                for (int c = cMin; c <= cMax; c++) {
+                    if (!alive[r][c]) continue;
+
+                    // фактический прямоугольник кирпича (с учётом зазора GAP)
+                    double px = x + c * cellW;
+                    double py = y + r * cellH;
+                    double rw = cellW - GAP;
+                    double rh = cellH - GAP;
+
+                    // небольшая дельта, чтобы «скользящие» попадания учитывались
+                    double eps = 0.0001;
+
+                    if (bullet.x < px + rw + eps && bullet.x + bullet.w > px - eps &&
+                            bullet.y < py + rh + eps && bullet.y + bullet.h > py - eps) {
+
+                        alive[r][c] = false;
+
+                        // «эрозия» вокруг попадания — опционально
+                        if (Math.random() < 0.35) {
+                            for (int dr = -1; dr <= 1; dr++) {
+                                for (int dc = -1; dc <= 1; dc++) {
+                                    int rr = r + dr, cc = c + dc;
+                                    if (rr>=0 && rr<rows && cc>=0 && cc<cols && Math.random()<0.35) {
+                                        alive[rr][cc] = false;
+                                    }
+                                }
+                            }
+                        }
+                        return true; // кирпич сломан → пулю гасим
+                    }
+                }
+            }
+
+            // кирпич не задет → пулю НЕ гасим (пролетает через «дыру»)
+            return false;
+        }
+
+
+        void draw(GraphicsContext g) {
+            g.setFill(Color.LIMEGREEN);
+            for (int r = 0; r < rows; r++) {
+                for (int c = 0; c < cols; c++) {
+                    if (alive[r][c]) {
+                        double px = x + c * cellW;
+                        double py = y + r * cellH;
+                        g.fillRect(px, py, cellW - 2, cellH - 2);
+                    }
+                }
+            }
+        }
+    }
+
+    public static class BonusShip extends Entity {
+        double vx; // скорость по X
+        public BonusShip(double x, double y, double w, double h, double vx) {
+            super(x, y, w, h);
+            this.vx = vx;
+        }
+        void draw(GraphicsContext g) {
+            // простая «летающая тарелка»
+            g.setFill(GREEN);
+            g.fillRect(x, y + h/2, w, h/2);                 // корпус
+            g.fillRect(x + w/2 - 6, y, 12, h/2);            // кабина
+        }
+    }
+
     public static void main(String[] args) {
         launch(args);
     }
 }
-
